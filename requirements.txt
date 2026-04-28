@@ -38,7 +38,7 @@ word2number>=1.1
 # vllm>=0.3.0
 
 # --- Project Dependencies ---
-open-dataflow
+open-dataflow>=1.0.9
 aiohttp
 sacrebleu
 rouge_score
