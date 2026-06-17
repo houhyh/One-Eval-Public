@@ -28,6 +28,8 @@ English | [简体中文](./README_zh.md)
 
 ## 📰 1. News
 
+- **\[2026-06] 🧩 One-Eval is now available as a portable Skill!**\
+  Use One-Eval directly inside **Claude Code** (or Codex) — no frontend/backend to launch. Just point Claude Code at this repo and start evaluating. See [Quick Start → Use with Claude Code](#32-use-with-claude-code-recommended).
 - **\[2026-03] 🎉 One-Eval (v0.1.0) is officially open-sourced!**\
   We released the first version, supporting full-link automation from natural language to evaluation reports (NL2Eval). Say goodbye to tedious manual scripts and make LLM evaluation as simple, intuitive, and controllable as chatting. Welcome to Star 🌟 and follow!
 
@@ -51,36 +53,45 @@ Traditional evaluation often faces pain points such as complex scripts, fragment
 
 ## ⚡ 3. Quick Start
 
-### 3.1 Installation (Recommended)
+There are two independent ways to use One-Eval — **pick whichever suits you**:
 
-We provide two environment management methods: Conda and uv. Choose one to get started quickly:
+- **3.1 Use with Claude Code** — zero setup, just paste one line. Best for getting started fast.
+- **3.2 Web UI (Frontend + Backend)** — a full interactive interface; requires environment setup.
 
-#### Option A: Conda
+### 3.1 Use with Claude Code
+
+Zero setup. Just paste this to **Claude Code** (or Codex, or any coding agent):
+
+```text
+Use the one-eval-skill in https://github.com/OpenDCAI/One-Eval to get us started on evaluating my model.
+```
+
+### 3.2 Web UI (Frontend + Backend)
+
+A full web UI with a separation of frontend and backend architecture.
+
+#### Step 1: Install the environment
+
+We provide two environment management methods: Conda and uv. Choose one:
 
 ```bash
+# Option A: Conda
 conda create -n one-eval python=3.11 -y
 conda activate one-eval
 pip install -e .
-```
 
-#### Option B: uv
-
-```bash
+# Option B: uv
 uv venv
 uv pip install -e .
 ```
 
-### 3.2 Start Services
-
-One-Eval adopts a separation of frontend and backend architecture. Please start the backend API and frontend interface respectively.
-
-#### ① Start Backend (FastAPI)
+#### Step 2: Start Backend (FastAPI)
 
 ```bash
 uvicorn one_eval.server.app:app --host 0.0.0.0 --port 8000
 ```
 
-#### ② Start Frontend (Vite + React)
+#### Step 3: Start Frontend (Vite + React)
 
 ```bash
 cd one-eval-web
@@ -91,18 +102,6 @@ npm run dev
 Visit <http://localhost:5173> to start interactive evaluation.
 
 > Note: After starting, please enter the settings interface first to configure parameters such as API, model, and HF Token (to support batch data download), and click save.
-
-### 3.3 Minimal Code Mode (Developer Mode)
-
-If you prefer to call directly in code, you can run the built-in complete workflow example:\
-[workflow_all.py](./one_eval/graph/workflow_all.py)
-
-```bash
-# Example: Initiate a reasoning capability evaluation directly via command line
-python -m one_eval.graph.workflow_all "I want to evaluate my model's performance on Reasoning tasks"
-```
-
-This Graph demonstrates the complete closed loop from Query parsing to report generation. You are welcome to develop and extend nodes based on this.
 
 ## 🗂️ 4. Bench Gallery
 

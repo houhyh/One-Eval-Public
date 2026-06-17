@@ -712,6 +712,83 @@ class DataFlowEvalTool:
                     cnt += 1
         return cnt
 
+    def _rescore_qa_single(
+        self,
+        step_file: str,
+        eval_result_path: str,
+        stats: Dict[str, Any],
+        target_key: Optional[str],
+        targets_key: Optional[str],
+    ) -> Dict[str, Any]:
+        """对 key2_qa 用修正后的数值匹配重打主分（代码层，不动 dataflow 内核）。
+
+        内核 _eval_qa_single 把「金标全文」直接和预测做包含匹配、且预测取最后一个数，
+        会在 CoT 拖带时间/单位时产生假阴性（如蜡烛题 gold=8、模型答 8 却判错）。
+        这里只「翻正」内核判错但数值确实匹配的样本，绝不把判对的翻负；非数值金标
+        （numeric_answer_match 返回 None）保持内核判定不动。重算 accuracy 覆盖 stats。
+        """
+        from one_eval.utils.extractor import numeric_answer_match
+
+        if not step_file or not os.path.exists(step_file):
+            return stats
+        tgt = target_key or targets_key
+        if not tgt:
+            return stats
+        try:
+            df = pd.read_json(step_file, lines=True)
+        except Exception as e:
+            log.warning(f"[rescore] 读取 {step_file} 失败，跳过重打分: {e}")
+            return stats
+        if "eval_score" not in df.columns or tgt not in df.columns:
+            return stats
+
+        pred_col = "generated_ans" if "generated_ans" in df.columns else None
+        if pred_col is None:
+            return stats
+
+        # 内核可能把这些列建成 arrow-string dtype，直接写 int/float 会 TypeError；先转 object。
+        for col in ("eval_score", "eval_pred", "eval_error"):
+            if col in df.columns:
+                df[col] = df[col].astype(object)
+
+        flipped = 0
+        for idx, row in df.iterrows():
+            if not bool(row.get("eval_valid", True)):
+                continue
+            cur = row.get("eval_score")
+            if cur is not None and float(cur) >= 1.0:
+                continue  # 已判对，绝不翻负
+            gold = row.get(tgt)
+            num_ok = numeric_answer_match(row.get(pred_col), gold)
+            if num_ok is True:
+                df.at[idx, "eval_score"] = 1.0
+                df.at[idx, "eval_pred"] = 1
+                df.at[idx, "eval_error"] = ""
+                flipped += 1
+
+        if flipped == 0:
+            return stats
+
+        df.to_json(step_file, orient="records", lines=True, force_ascii=False)
+        valid_mask = df["eval_valid"] == True if "eval_valid" in df.columns else pd.Series([True] * len(df))
+        valid_samples = int(valid_mask.sum())
+        score_series = pd.to_numeric(df.loc[valid_mask, "eval_score"], errors="coerce")
+        accuracy = float(score_series.mean()) if valid_samples > 0 and not score_series.empty else 0.0
+        stats = dict(stats)
+        stats["accuracy"] = accuracy
+        stats["score"] = accuracy
+        stats["valid_samples"] = valid_samples
+        stats["rescored_flips"] = flipped
+        stats["rescored_by"] = "one_eval.numeric_answer_match"
+        try:
+            Path(eval_result_path).write_text(
+                json.dumps([stats], ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            log.warning(f"[rescore] 回写 stats 失败: {e}")
+        log.info(f"[rescore] key2_qa 翻正 {flipped} 个内核假阴性 → accuracy={accuracy:.4f}")
+        return stats
+
     def run_eval(
         self,
         bench: BenchInfo,
@@ -827,6 +904,14 @@ class DataFlowEvalTool:
         judge_config = bench.meta.get("judge_config", {}) if isinstance(bench.meta, dict) else {}
         use_llm_as_judge = bool(judge_config.get("enabled") or judge_config.get("use_llm_as_judge"))
 
+        # API 目标模型对 key3_q_choices_a 拿不到 loglikelihood，必须走 parse-based 打分，
+        # 而 parse 依赖 generated_ans。此处与下方 metric_type=parse_choice_acc 的判定保持一致，
+        # 否则生成器会跳过 key3_q_choices_a 的生成，导致 evaluator parse_failed、valid=0。
+        api_parse_choice = (
+            bool(getattr(model_config, "is_api", False))
+            and bench.bench_dataflow_eval_type == "key3_q_choices_a"
+        )
+
         # 5. Step 1: Generator
         # 对于不需要生成的任务（如 text_score, choices_a_ll），Generator 可能只是透传或计算
         # BenchAnswerGenerator 内部会根据 eval_type 判断是否需要 generate
@@ -834,14 +919,23 @@ class DataFlowEvalTool:
         # 构造 Prompt Template (简单通用版)
         # 注意：对于 chat 模型，通常建议使用 apply_chat_template，这里简化为 FormatStrPrompt
         # 如果是 base 模型，这个 template 很重要
-        prompt_tmpl = FormatStrPrompt(f_str_template="{{question}}\nAnswer:")
+        #
+        # 选择题（key3_q_choices_a / key3_q_choices_as）必须把 choices 注入到 prompt，否则
+        # 模型看不到选项、会把题干当填空题续写，导致 parse_failed / 分数异常偏低。
+        # FormatStrPrompt 只做占位符替换，模板里没有 {choices} 就会丢掉选项；这里对选择题
+        # 传 None，让 BenchAnswerGenerator 走自带的 choice-aware fallback（含 "Output only the
+        # option letter"）。其余生成型任务仍用简单的问答模板。
+        if bench.bench_dataflow_eval_type in ("key3_q_choices_a", "key3_q_choices_as"):
+            prompt_tmpl = None
+        else:
+            prompt_tmpl = FormatStrPrompt(f_str_template="{{question}}\nAnswer:")
         
         generator = BenchAnswerGenerator(
             llm_serving=self.llm_serving,
             eval_type=bench.bench_dataflow_eval_type,
             prompt_template=prompt_tmpl,
             allow_overwrite=False,
-            force_generate=use_llm_as_judge, # judge 依赖 generated_ans，必须先生成
+            force_generate=use_llm_as_judge or api_parse_choice, # judge / API 选择题解析都依赖 generated_ans
         )
 
         log.info(f"[{bench.bench_name}] Running Step 1: Generator ({bench.bench_dataflow_eval_type})")
@@ -981,6 +1075,15 @@ class DataFlowEvalTool:
                     stats = stats_df.iloc[0].to_dict()
             except Exception as e:
                 log.error(f"Failed to read stats from {eval_result_path}: {e}")
+
+        # 代码层重打主分：单答案 QA（含数值题）用修正后的数值匹配翻正内核假阴性。
+        if bench.bench_dataflow_eval_type == "key2_qa":
+            try:
+                stats = self._rescore_qa_single(
+                    last_step_file, eval_result_path, stats, target_key, targets_key
+                )
+            except Exception as e:
+                log.warning(f"[{bench.bench_name}] 代码层重打分跳过: {e}")
 
         return {
             "stats": stats,
